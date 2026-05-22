@@ -1,0 +1,23 @@
+{
+  "name": "c2pa-koffi",
+  "version": "0.1.0",
+  "description": "Node.js bindings for the C2PA Rust library via koffi",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --loader ts-node/esm test/basic.test.ts",
+    "test:js": "node test/basic.test.js",
+    "fetch:c2pa": "node scripts/fetch-c2pa-lib.mjs"
+  },
+  "keywords": ["c2pa", "content-authenticity", "provenance"],
+  "license": "MIT OR Apache-2.0",
+  "dependencies": {
+    "koffi": "^2.9.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.0.0"
+  }
+}
