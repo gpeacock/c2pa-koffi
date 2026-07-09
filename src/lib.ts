@@ -182,8 +182,8 @@ function createLib(libPath: string) {
     c2pa_builder_update_hash_from_stream:  lib.func('c2pa_builder_update_hash_from_stream',   'int', ['C2paBuilder *', 'str', 'C2paStream *']),
 
     // sign — manifest_bytes_ptr passed as null (output goes to dest stream)
-    c2pa_builder_sign:         lib.func('c2pa_builder_sign',         'int64', ['C2paBuilder *', 'str', 'C2paStream *', 'C2paStream *', 'C2paSigner *', 'void *']),
-    c2pa_builder_sign_context: lib.func('c2pa_builder_sign_context', 'int64', ['C2paBuilder *', 'str', 'C2paStream *', 'C2paStream *', 'void *']),
+    c2pa_builder_sign:         lib.func('c2pa_builder_sign',         'int64', ['C2paBuilder *', 'str', 'C2paStream *', 'C2paStream *', 'C2paSigner *', koffi.out(koffi.pointer('void *'))]),
+    c2pa_builder_sign_context: lib.func('c2pa_builder_sign_context', 'int64', ['C2paBuilder *', 'str', 'C2paStream *', 'C2paStream *', koffi.out(koffi.pointer('void *'))]),
 
     // embeddable signing — bytes are the primary output (out pointer-to-pointer)
     c2pa_builder_placeholder:             lib.func('c2pa_builder_placeholder',             'int64', ['C2paBuilder *', 'str', koffi.out(koffi.pointer('void *'))]),

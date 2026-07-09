@@ -153,15 +153,17 @@ export class Builder {
   sign(mimeType: string, source: Buffer, signer: Signer): Buffer {
     const srcStream  = C2paStream.fromBuffer(source);
     const destStream = C2paStream.writable();
+    const manifestBytesOut: unknown[] = [null];
     try {
       checkInt(
         getLib().c2pa_builder_sign(
-          this._ptr, mimeType, srcStream.ptr, destStream.ptr, signer.ptr, null,
+          this._ptr, mimeType, srcStream.ptr, destStream.ptr, signer.ptr, manifestBytesOut,
         ),
         'Signing failed',
       );
       return destStream.getBytes();
     } finally {
+      if (manifestBytesOut[0]) getLib().c2pa_free(manifestBytesOut[0]);
       srcStream.dispose();
       destStream.dispose();
     }
@@ -174,15 +176,17 @@ export class Builder {
   signWithContext(mimeType: string, source: Buffer): Buffer {
     const srcStream  = C2paStream.fromBuffer(source);
     const destStream = C2paStream.writable();
+    const manifestBytesOut: unknown[] = [null];
     try {
       checkInt(
         getLib().c2pa_builder_sign_context(
-          this._ptr, mimeType, srcStream.ptr, destStream.ptr, null,
+          this._ptr, mimeType, srcStream.ptr, destStream.ptr, manifestBytesOut,
         ),
         'Signing failed',
       );
       return destStream.getBytes();
     } finally {
+      if (manifestBytesOut[0]) getLib().c2pa_free(manifestBytesOut[0]);
       srcStream.dispose();
       destStream.dispose();
     }
