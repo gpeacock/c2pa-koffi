@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "test": "node --loader ts-node/esm test/basic.test.ts",
-    "test:js": "node test/basic.test.js && node test/stream.test.js",
+    "test:js": "node test/basic.test.js && node test/stream.test.js && node test/async.test.js",
     "fetch:c2pa": "node scripts/fetch-c2pa-lib.mjs"
   },
   "keywords": [

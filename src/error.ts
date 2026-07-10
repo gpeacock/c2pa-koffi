@@ -81,3 +81,28 @@ export function checkPtr<T>(ptr: T | null | undefined | false | 0, fallback?: st
   if (!ptr) throwLastError(fallback);
   return ptr as T;
 }
+
+// ── Async variants ───────────────────────────────────────────────────────────
+//
+// c2pa-rs's LAST_ERROR is thread-local (see c2pa_c_ffi/src/cimpl/cimpl_error.rs).
+// Calls made via koffi's .async() run on a worker thread, but c2pa_error() is a
+// plain synchronous call that reads whichever thread it's invoked from — which
+// under concurrency is essentially never the worker thread that set the error
+// (confirmed empirically: concurrent async failures return empty or another
+// call's message, never their own). So async failures can only report a generic
+// message, not the detailed "Type: reason" text the sync API provides.
+
+/** Check integer return value from an async call; throws a generic error (no
+ * detailed message — see note above) if negative. */
+export function checkIntAsync(result: number | bigint, fallback = 'Unknown C2PA error'): number {
+  const n = typeof result === 'bigint' ? Number(result) : result;
+  if (n < 0) throw new C2paError(fallback);
+  return n;
+}
+
+/** Check pointer return value from an async call; throws a generic error (no
+ * detailed message — see note above) if null/falsy. */
+export function checkPtrAsync<T>(ptr: T | null | undefined | false | 0, fallback = 'Unknown C2PA error'): T {
+  if (!ptr) throw new C2paError(fallback);
+  return ptr as T;
+}

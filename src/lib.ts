@@ -226,3 +226,18 @@ export function decodeBytesAndFree(ptr: unknown, size: number): Buffer {
 export function toNum(v: number | bigint): number {
   return typeof v === 'bigint' ? Number(v) : v;
 }
+
+/**
+ * Promisify a koffi function's built-in `.async()` call, which runs the
+ * native call on a koffi-managed worker thread instead of blocking the
+ * event loop. Registered stream callbacks (read/write/seek) invoked during
+ * the call are safely marshaled back to the main thread by koffi.
+ */
+export function callAsync<T>(fn: { async: (...a: unknown[]) => void }, ...args: unknown[]): Promise<T> {
+  return new Promise((resolve, reject) => {
+    fn.async(...args, (err: unknown, res: T) => {
+      if (err) reject(err instanceof Error ? err : new Error(String(err)));
+      else resolve(res);
+    });
+  });
+}
