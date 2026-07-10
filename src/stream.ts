@@ -14,6 +14,44 @@ import {
 } from './lib.js';
 import { checkPtr } from './error.js';
 
+// ── Public asset types ───────────────────────────────────────────────────────
+// Modeled after @contentauth/c2pa-node's SourceAsset/DestinationAsset split.
+// `{ fd }` also accepts an fs.promises.FileHandle directly, since it exposes
+// a `.fd` property — the caller owns opening/closing it in that case.
+
+/** A file already open for reading or writing, identified by its descriptor. */
+export interface FileHandleAsset {
+  fd: number;
+}
+
+/** A file on disk, identified by path. Opened (and closed) internally. */
+export interface FileAsset {
+  path: string;
+}
+
+/**
+ * An in-memory destination slot: pass `{ buffer: null }` and, after the call,
+ * `buffer` will hold the written bytes. Mirrors @contentauth/c2pa-node's
+ * `DestinationBufferAsset`.
+ */
+export interface DestinationBufferAsset {
+  buffer: Buffer | null;
+}
+
+/** An asset to read from: in-memory bytes, an open file handle, or a path. */
+export type SourceAsset = Buffer | Uint8Array | FileHandleAsset | FileAsset;
+
+/** An asset to write to: an open file handle, a path, or an in-memory buffer slot. */
+export type DestinationAsset = FileHandleAsset | FileAsset | DestinationBufferAsset;
+
+function isFileAsset(v: object): v is FileAsset {
+  return typeof (v as FileAsset).path === 'string';
+}
+
+function isDestinationBufferAsset(v: object): v is DestinationBufferAsset {
+  return 'buffer' in v;
+}
+
 /** Backing store for a C2paStream. Tracks its own read/write position. */
 interface StreamBackend {
   read(out: Buffer): number;
@@ -84,12 +122,15 @@ class BufferBackend implements StreamBackend {
  */
 class FileBackend implements StreamBackend {
   private readonly _fd: number;
+  private readonly _ownsFd: boolean;
   private _pos = 0;
   private _size: number;
 
-  constructor(fd: number, initialSize: number) {
+  /** `ownsFd` controls whether close() actually closes the descriptor — false when the caller opened/owns it. */
+  constructor(fd: number, initialSize: number, ownsFd: boolean) {
     this._fd = fd;
     this._size = initialSize;
+    this._ownsFd = ownsFd;
   }
 
   read(out: Buffer): number {
@@ -116,7 +157,7 @@ class FileBackend implements StreamBackend {
   }
 
   close(): void {
-    closeSync(this._fd);
+    if (this._ownsFd) closeSync(this._fd);
   }
 }
 
@@ -230,7 +271,7 @@ export class C2paStream {
   static fromFile(path: string): C2paStream {
     const fd = openSync(path, fsConstants.O_RDONLY);
     const size = fstatSync(fd).size;
-    return new C2paStream(new FileBackend(fd, size));
+    return new C2paStream(new FileBackend(fd, size, true));
   }
 
   /**
@@ -239,7 +280,39 @@ export class C2paStream {
    */
   static toFile(path: string): C2paStream {
     const fd = openSync(path, fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_TRUNC);
-    return new C2paStream(new FileBackend(fd, 0));
+    return new C2paStream(new FileBackend(fd, 0, true));
+  }
+
+  /**
+   * Build a read-only stream from a SourceAsset: in-memory bytes, an open
+   * file handle (fd left open — caller owns it), or a path (opened here).
+   */
+  static fromSource(source: SourceAsset): C2paStream {
+    if (Buffer.isBuffer(source) || source instanceof Uint8Array) return C2paStream.fromBuffer(source);
+    if (isFileAsset(source)) return C2paStream.fromFile(source.path);
+    const size = fstatSync(source.fd).size;
+    return new C2paStream(new FileBackend(source.fd, size, false));
+  }
+
+  /**
+   * Build a read+write+seek stream for a DestinationAsset: an open file
+   * handle, a path, or an in-memory buffer slot (also the default when
+   * `dest` is omitted).
+   */
+  static forDestination(dest?: DestinationAsset): C2paStream {
+    if (dest === undefined || isDestinationBufferAsset(dest)) return C2paStream.writable();
+    if (isFileAsset(dest)) return C2paStream.toFile(dest.path);
+    let size = 0;
+    try { size = fstatSync(dest.fd).size; } catch { /* not all fds are stat-able (e.g. pipes) */ }
+    return new C2paStream(new FileBackend(dest.fd, size, false));
+  }
+
+  /**
+   * After writing to a stream built by forDestination(), populate
+   * `dest.buffer` if `dest` was a DestinationBufferAsset.
+   */
+  static finalizeDestination(dest: DestinationAsset | undefined, stream: C2paStream): void {
+    if (dest !== undefined && isDestinationBufferAsset(dest)) dest.buffer = stream.getBytes();
   }
 
   /** Return a copy of the bytes written so far. Only valid for in-memory streams. */

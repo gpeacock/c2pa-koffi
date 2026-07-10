@@ -8,7 +8,6 @@ const os = require('os');
 const c2pa = require('../dist/index.js');
 const { C2paStream } = require('../dist/stream.js');
 const { getLib } = require('../dist/lib.js');
-const { checkInt } = require('../dist/error.js');
 
 let passed = 0;
 let failed = 0;
@@ -125,41 +124,34 @@ function loadTestEs256() {
   };
 }
 
-test('sign into a toFile() destination matches sign into an in-memory buffer', () => {
+test('sign into a file-path destination matches sign into an in-memory buffer, and returns manifest bytes', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'c2pa-stream-test-'));
   try {
     const { key, cert } = loadTestEs256();
     const signerInfo = { alg: 'Es256', signCert: cert, privateKey: key };
     const manifestJson = JSON.stringify({ title: 'stream test', claim_generator: 'stream-test/0.1' });
 
-    // Reference: existing buffer-only path.
-    const bufSigner = c2pa.Signer.fromInfo(signerInfo);
-    let bufSigned;
-    try {
-      bufSigned = c2pa.sign('image/jpeg', fs.readFileSync(testImage), manifestJson, bufSigner);
-    } finally {
-      bufSigner.dispose();
-    }
+    // Reference: existing buffer-only path. c2pa.sign() consumes the signer
+    // (ownership transfers to its internal Context) — do not dispose it after.
+    // dest is a mutable buffer slot: sign() returns the manifest bytes, and
+    // populates dest.buffer with the signed asset.
+    const bufDest = { buffer: null };
+    const bufManifestBytes = c2pa.sign(
+      'image/jpeg', fs.readFileSync(testImage), manifestJson, c2pa.Signer.fromInfo(signerInfo), bufDest,
+    );
+    assert(bufManifestBytes.length > 0, 'expected non-empty manifest bytes from buffer-dest sign()');
+    const bufSigned = bufDest.buffer;
 
-    // New: sign straight to disk via toFile(), reading the source via fromFile().
+    // New: sign straight to disk, source and destination both given as file paths.
+    // The signer now lives on the Context, not passed to sign().
     const outPath = path.join(tmpDir, 'signed.jpg');
-    const ctx = c2pa.Context.default();
+    const ctx = new c2pa.ContextBuilder().withSigner(c2pa.Signer.fromInfo(signerInfo)).build();
     const builder = new c2pa.Builder(ctx);
-    const fileSigner = c2pa.Signer.fromInfo(signerInfo);
-    const srcStream = C2paStream.fromFile(testImage);
-    const destStream = C2paStream.toFile(outPath);
-    const manifestBytesOut = [null];
     try {
       builder.setDefinition(manifestJson);
-      checkInt(
-        getLib().c2pa_builder_sign(builder['_ptr'], 'image/jpeg', srcStream.ptr, destStream.ptr, fileSigner.ptr, manifestBytesOut),
-        'Signing to file failed',
-      );
+      const manifestBytes = builder.sign('image/jpeg', { path: testImage }, { path: outPath });
+      assert(manifestBytes.length > 0, 'expected non-empty manifest bytes from file-dest sign()');
     } finally {
-      if (manifestBytesOut[0]) getLib().c2pa_free(manifestBytesOut[0]);
-      srcStream.dispose();
-      destStream.dispose();
-      fileSigner.dispose();
       builder.dispose();
       ctx.dispose();
     }
@@ -174,6 +166,37 @@ test('sign into a toFile() destination matches sign into an in-memory buffer', (
     const activeBuf = manifestFromBuf.manifests[manifestFromBuf.active_manifest];
     assert(activeFile.title === activeBuf.title, 'title mismatch between file-signed and buffer-signed assets');
     assert(activeFile.title === 'stream test', `unexpected title: ${activeFile.title}`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('sign() accepts an already-open file handle for both source and destination', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'c2pa-stream-test-'));
+  try {
+    const { key, cert } = loadTestEs256();
+    const signerInfo = { alg: 'Es256', signCert: cert, privateKey: key };
+    const manifestJson = JSON.stringify({ title: 'fd test' });
+
+    const outPath = path.join(tmpDir, 'signed.jpg');
+    const srcFd = fs.openSync(testImage, 'r');
+    const destFd = fs.openSync(outPath, 'w+');
+
+    const ctx = new c2pa.ContextBuilder().withSigner(c2pa.Signer.fromInfo(signerInfo)).build();
+    const builder = new c2pa.Builder(ctx);
+    try {
+      builder.setDefinition(manifestJson);
+      builder.sign('image/jpeg', { fd: srcFd }, { fd: destFd });
+    } finally {
+      builder.dispose();
+      ctx.dispose();
+      // The caller opened these fds, so the binding must not have closed them.
+      fs.closeSync(srcFd);
+      fs.closeSync(destFd);
+    }
+
+    const manifest = c2pa.read('image/jpeg', fs.readFileSync(outPath));
+    assert(manifest.manifests[manifest.active_manifest].title === 'fd test', 'title mismatch for fd-signed asset');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

@@ -4,7 +4,7 @@
 
 import { getLib, decodeAndFree, callAsync } from './lib.js';
 import { checkPtr, checkInt, checkPtrAsync, checkIntAsync } from './error.js';
-import { C2paStream } from './stream.js';
+import { C2paStream, type SourceAsset, type DestinationAsset } from './stream.js';
 import { Context } from './context.js';
 
 /**
@@ -37,8 +37,8 @@ export class Reader {
    * Read and verify the manifest from an asset buffer.
    * Returns `this` for chaining.
    */
-  read(mimeType: string, asset: Buffer): this {
-    const stream = C2paStream.fromBuffer(asset);
+  read(mimeType: string, asset: SourceAsset): this {
+    const stream = C2paStream.fromSource(asset);
     try {
       const newPtr = checkPtr(
         getLib().c2pa_reader_with_stream(this._ptr, mimeType, stream.ptr),
@@ -61,8 +61,8 @@ export class Reader {
    * thread-local and can't be read reliably across the async boundary
    * under concurrency, so only a generic message is available here.
    */
-  async readAsync(mimeType: string, asset: Buffer): Promise<this> {
-    const stream = C2paStream.fromBuffer(asset);
+  async readAsync(mimeType: string, asset: SourceAsset): Promise<this> {
+    const stream = C2paStream.fromSource(asset);
     try {
       const newPtr = checkPtrAsync(
         await callAsync<unknown>(getLib().c2pa_reader_with_stream, this._ptr, mimeType, stream.ptr),
@@ -79,8 +79,8 @@ export class Reader {
    * Read from an asset buffer with an explicit detached manifest.
    * Used for cloud/sidecar manifest workflows.
    */
-  readWithManifest(mimeType: string, asset: Buffer, manifestData: Buffer): this {
-    const stream = C2paStream.fromBuffer(asset);
+  readWithManifest(mimeType: string, asset: SourceAsset, manifestData: Buffer): this {
+    const stream = C2paStream.fromSource(asset);
     try {
       const newPtr = checkPtr(
         getLib().c2pa_reader_with_manifest_data_and_stream(
@@ -96,8 +96,8 @@ export class Reader {
   }
 
   /** Async version of readWithManifest(). See readAsync() for the error-detail caveat. */
-  async readWithManifestAsync(mimeType: string, asset: Buffer, manifestData: Buffer): Promise<this> {
-    const stream = C2paStream.fromBuffer(asset);
+  async readWithManifestAsync(mimeType: string, asset: SourceAsset, manifestData: Buffer): Promise<this> {
+    const stream = C2paStream.fromSource(asset);
     try {
       const newPtr = checkPtrAsync(
         await callAsync<unknown>(
@@ -117,9 +117,9 @@ export class Reader {
    * Read a fragmented BMFF asset (e.g. a fragmented MP4).
    * `fragment` is the separate fragment stream containing the manifest box.
    */
-  readFragment(mimeType: string, asset: Buffer, fragment: Buffer): this {
-    const assetStream    = C2paStream.fromBuffer(asset);
-    const fragmentStream = C2paStream.fromBuffer(fragment);
+  readFragment(mimeType: string, asset: SourceAsset, fragment: SourceAsset): this {
+    const assetStream    = C2paStream.fromSource(asset);
+    const fragmentStream = C2paStream.fromSource(fragment);
     try {
       const newPtr = checkPtr(
         getLib().c2pa_reader_with_fragment(
@@ -136,9 +136,9 @@ export class Reader {
   }
 
   /** Async version of readFragment(). See readAsync() for the error-detail caveat. */
-  async readFragmentAsync(mimeType: string, asset: Buffer, fragment: Buffer): Promise<this> {
-    const assetStream    = C2paStream.fromBuffer(asset);
-    const fragmentStream = C2paStream.fromBuffer(fragment);
+  async readFragmentAsync(mimeType: string, asset: SourceAsset, fragment: SourceAsset): Promise<this> {
+    const assetStream    = C2paStream.fromSource(asset);
+    const fragmentStream = C2paStream.fromSource(fragment);
     try {
       const newPtr = checkPtrAsync(
         await callAsync<unknown>(
@@ -181,31 +181,32 @@ export class Reader {
   }
 
   /**
-   * Write a named resource (e.g. a thumbnail) to the returned Buffer.
-   * `uri` must match an identifier in the manifest store.
+   * Write a named resource (e.g. a thumbnail) identified by `uri` (an
+   * identifier in the manifest store). Returns a Buffer, or writes straight
+   * to `dest` (returning `undefined`) if given.
    */
-  getResource(uri: string): Buffer {
-    const out = C2paStream.writable();
+  getResource(uri: string, dest?: DestinationAsset): Buffer | undefined {
+    const out = C2paStream.forDestination(dest);
     try {
       checkInt(
         getLib().c2pa_reader_resource_to_stream(this._ptr, uri, out.ptr),
         `Failed to get resource: ${uri}`,
       );
-      return out.getBytes();
+      return dest === undefined ? out.getBytes() : undefined;
     } finally {
       out.dispose();
     }
   }
 
   /** Async version of getResource(). Throws a generic error on failure (see readAsync()). */
-  async getResourceAsync(uri: string): Promise<Buffer> {
-    const out = C2paStream.writable();
+  async getResourceAsync(uri: string, dest?: DestinationAsset): Promise<Buffer | undefined> {
+    const out = C2paStream.forDestination(dest);
     try {
       checkIntAsync(
         await callAsync<number | bigint>(getLib().c2pa_reader_resource_to_stream, this._ptr, uri, out.ptr),
         `Failed to get resource: ${uri}`,
       );
-      return out.getBytes();
+      return dest === undefined ? out.getBytes() : undefined;
     } finally {
       out.dispose();
     }

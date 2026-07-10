@@ -5,9 +5,8 @@
 import koffi from 'koffi';
 import { getLib, decodeBytesAndFree, toNum, callAsync } from './lib.js';
 import { checkPtr, checkInt, checkPtrAsync, checkIntAsync } from './error.js';
-import { C2paStream } from './stream.js';
+import { C2paStream, type SourceAsset, type DestinationAsset } from './stream.js';
 import { Context } from './context.js';
-import { Signer } from './signer.js';
 
 import { BuilderIntentValues, DigitalSourceTypeValues } from './lib.js';
 
@@ -24,12 +23,18 @@ export enum HashType {
 /**
  * Builds and signs C2PA manifests.
  *
+ * Signing always uses the signer attached to the Context — either set
+ * explicitly via `ContextBuilder.withSigner()`, or derived from a `signer`
+ * section in `Settings`. There is no per-call signer argument.
+ *
  * Typical usage:
  * ```ts
- * const ctx = Context.default();
+ * const ctx = new ContextBuilder().withSigner(signer).build();
  * const builder = new Builder(ctx);
  * builder.setDefinition(JSON.stringify({ title: 'My Asset' }));
- * const signed = builder.sign('image/jpeg', sourceBuffer, signer);
+ * const dest = { buffer: null };
+ * const manifestBytes = builder.sign('image/jpeg', sourceBuffer, dest);
+ * const signedAsset = dest.buffer;
  * ctx.dispose();
  * builder.dispose();
  * ```
@@ -95,8 +100,8 @@ export class Builder {
    * @param mimeType       - MIME type of the asset.
    * @param asset          - Asset bytes.
    */
-  addIngredient(ingredientJson: string, mimeType: string, asset: Buffer): this {
-    const stream = C2paStream.fromBuffer(asset);
+  addIngredient(ingredientJson: string, mimeType: string, asset: SourceAsset): this {
+    const stream = C2paStream.fromSource(asset);
     try {
       checkInt(
         getLib().c2pa_builder_add_ingredient_from_stream(
@@ -111,8 +116,8 @@ export class Builder {
   }
 
   /** Async version of addIngredient(). Throws a generic error on failure (see Reader.readAsync()). */
-  async addIngredientAsync(ingredientJson: string, mimeType: string, asset: Buffer): Promise<this> {
-    const stream = C2paStream.fromBuffer(asset);
+  async addIngredientAsync(ingredientJson: string, mimeType: string, asset: SourceAsset): Promise<this> {
+    const stream = C2paStream.fromSource(asset);
     try {
       checkIntAsync(
         await callAsync<number | bigint>(
@@ -127,8 +132,8 @@ export class Builder {
   }
 
   /** Add a resource (e.g. a custom thumbnail) identified by `uri`. */
-  addResource(uri: string, data: Buffer): this {
-    const stream = C2paStream.fromBuffer(data);
+  addResource(uri: string, data: SourceAsset): this {
+    const stream = C2paStream.fromSource(data);
     try {
       checkInt(
         getLib().c2pa_builder_add_resource(this._ptr, uri, stream.ptr),
@@ -141,8 +146,8 @@ export class Builder {
   }
 
   /** Async version of addResource(). Throws a generic error on failure (see Reader.readAsync()). */
-  async addResourceAsync(uri: string, data: Buffer): Promise<this> {
-    const stream = C2paStream.fromBuffer(data);
+  async addResourceAsync(uri: string, data: SourceAsset): Promise<this> {
+    const stream = C2paStream.fromSource(data);
     try {
       checkIntAsync(
         await callAsync<number | bigint>(getLib().c2pa_builder_add_resource, this._ptr, uri, stream.ptr),
@@ -161,8 +166,8 @@ export class Builder {
   }
 
   /** Add an ingredient from a previously written ingredient archive. */
-  addIngredientFromArchive(archive: Buffer): this {
-    const stream = C2paStream.fromBuffer(archive);
+  addIngredientFromArchive(archive: SourceAsset): this {
+    const stream = C2paStream.fromSource(archive);
     try {
       checkInt(
         getLib().c2pa_builder_add_ingredient_from_archive(this._ptr, stream.ptr),
@@ -175,8 +180,8 @@ export class Builder {
   }
 
   /** Async version of addIngredientFromArchive(). Throws a generic error on failure (see Reader.readAsync()). */
-  async addIngredientFromArchiveAsync(archive: Buffer): Promise<this> {
-    const stream = C2paStream.fromBuffer(archive);
+  async addIngredientFromArchiveAsync(archive: SourceAsset): Promise<this> {
+    const stream = C2paStream.fromSource(archive);
     try {
       checkIntAsync(
         await callAsync<number | bigint>(getLib().c2pa_builder_add_ingredient_from_archive, this._ptr, stream.ptr),
@@ -191,23 +196,29 @@ export class Builder {
   // ── Signing ─────────────────────────────────────────────────────────────
 
   /**
-   * Sign an asset and return the signed bytes.
-   * This is the standard single-step sign workflow.
+   * Sign an asset using the signer attached to the Context (set explicitly
+   * via `ContextBuilder.withSigner()`, or derived from a `signer` section in
+   * `Settings`). The signed asset is written to `dest` — a file path, an
+   * open file handle, or `{ buffer: null }` (populated with the signed
+   * bytes in place, for the common in-memory case).
+   *
+   * Returns the raw manifest bytes, needed for remote-manifest/no-embed/
+   * sidecar workflows even when the asset itself was embedded.
    */
-  sign(mimeType: string, source: Buffer, signer: Signer): Buffer {
-    const srcStream  = C2paStream.fromBuffer(source);
-    const destStream = C2paStream.writable();
+  sign(mimeType: string, source: SourceAsset, dest: DestinationAsset): Buffer {
+    const srcStream  = C2paStream.fromSource(source);
+    const destStream = C2paStream.forDestination(dest);
     const manifestBytesOut: unknown[] = [null];
     try {
-      checkInt(
-        getLib().c2pa_builder_sign(
-          this._ptr, mimeType, srcStream.ptr, destStream.ptr, signer.ptr, manifestBytesOut,
+      const size = checkInt(
+        getLib().c2pa_builder_sign_context(
+          this._ptr, mimeType, srcStream.ptr, destStream.ptr, manifestBytesOut,
         ),
         'Signing failed',
       );
-      return destStream.getBytes();
+      C2paStream.finalizeDestination(dest, destStream);
+      return decodeBytesAndFree(manifestBytesOut[0], size);
     } finally {
-      if (manifestBytesOut[0]) getLib().c2pa_free(manifestBytesOut[0]);
       srcStream.dispose();
       destStream.dispose();
     }
@@ -216,71 +227,27 @@ export class Builder {
   /**
    * Async version of sign(). Runs the native call via koffi's built-in
    * `.async()` dispatch instead of blocking the event loop — this is the
-   * one to use for large (e.g. multi-GB) assets combined with
-   * C2paStream.fromFile()/toFile() source/dest streams.
+   * one to use for large (e.g. multi-GB) assets combined with file-backed
+   * source/dest assets.
    *
    * Note: on failure this throws a generic C2paError, not the detailed
    * "Type: reason" message the sync API provides — see Reader.readAsync().
    */
-  async signAsync(mimeType: string, source: Buffer, signer: Signer): Promise<Buffer> {
-    const srcStream  = C2paStream.fromBuffer(source);
-    const destStream = C2paStream.writable();
+  async signAsync(mimeType: string, source: SourceAsset, dest: DestinationAsset): Promise<Buffer> {
+    const srcStream  = C2paStream.fromSource(source);
+    const destStream = C2paStream.forDestination(dest);
     const manifestBytesOut: unknown[] = [null];
     try {
-      checkIntAsync(
-        await callAsync<number | bigint>(
-          getLib().c2pa_builder_sign,
-          this._ptr, mimeType, srcStream.ptr, destStream.ptr, signer.ptr, manifestBytesOut,
-        ),
-        'Signing failed',
-      );
-      return destStream.getBytes();
-    } finally {
-      if (manifestBytesOut[0]) getLib().c2pa_free(manifestBytesOut[0]);
-      srcStream.dispose();
-      destStream.dispose();
-    }
-  }
-
-  /**
-   * Sign using the signer baked into the Context.
-   * The context must have been built with ContextBuilder.withSigner().
-   */
-  signWithContext(mimeType: string, source: Buffer): Buffer {
-    const srcStream  = C2paStream.fromBuffer(source);
-    const destStream = C2paStream.writable();
-    const manifestBytesOut: unknown[] = [null];
-    try {
-      checkInt(
-        getLib().c2pa_builder_sign_context(
-          this._ptr, mimeType, srcStream.ptr, destStream.ptr, manifestBytesOut,
-        ),
-        'Signing failed',
-      );
-      return destStream.getBytes();
-    } finally {
-      if (manifestBytesOut[0]) getLib().c2pa_free(manifestBytesOut[0]);
-      srcStream.dispose();
-      destStream.dispose();
-    }
-  }
-
-  /** Async version of signWithContext(). See signAsync() for the error-detail caveat. */
-  async signWithContextAsync(mimeType: string, source: Buffer): Promise<Buffer> {
-    const srcStream  = C2paStream.fromBuffer(source);
-    const destStream = C2paStream.writable();
-    const manifestBytesOut: unknown[] = [null];
-    try {
-      checkIntAsync(
+      const size = checkIntAsync(
         await callAsync<number | bigint>(
           getLib().c2pa_builder_sign_context,
           this._ptr, mimeType, srcStream.ptr, destStream.ptr, manifestBytesOut,
         ),
         'Signing failed',
       );
-      return destStream.getBytes();
+      C2paStream.finalizeDestination(dest, destStream);
+      return decodeBytesAndFree(manifestBytesOut[0], size);
     } finally {
-      if (manifestBytesOut[0]) getLib().c2pa_free(manifestBytesOut[0]);
       srcStream.dispose();
       destStream.dispose();
     }
@@ -349,8 +316,8 @@ export class Builder {
   }
 
   /** Hash the asset stream and update the hard binding assertion. */
-  updateHashFromStream(mimeType: string, asset: Buffer): this {
-    const stream = C2paStream.fromBuffer(asset);
+  updateHashFromStream(mimeType: string, asset: SourceAsset): this {
+    const stream = C2paStream.fromSource(asset);
     try {
       checkInt(
         getLib().c2pa_builder_update_hash_from_stream(this._ptr, mimeType, stream.ptr),
@@ -363,8 +330,8 @@ export class Builder {
   }
 
   /** Async version of updateHashFromStream(). Throws a generic error on failure (see Reader.readAsync()). */
-  async updateHashFromStreamAsync(mimeType: string, asset: Buffer): Promise<this> {
-    const stream = C2paStream.fromBuffer(asset);
+  async updateHashFromStreamAsync(mimeType: string, asset: SourceAsset): Promise<this> {
+    const stream = C2paStream.fromSource(asset);
     try {
       checkIntAsync(
         await callAsync<number | bigint>(getLib().c2pa_builder_update_hash_from_stream, this._ptr, mimeType, stream.ptr),
@@ -378,34 +345,34 @@ export class Builder {
 
   // ── Archive workflows ────────────────────────────────────────────────────
 
-  /** Serialize the builder state to an archive buffer for later restoration. */
-  toArchive(): Buffer {
-    const out = C2paStream.writable();
+  /** Serialize the builder state to an archive. Pass `dest` to write straight to a file instead of returning a Buffer. */
+  toArchive(dest?: DestinationAsset): Buffer | undefined {
+    const out = C2paStream.forDestination(dest);
     try {
       checkInt(getLib().c2pa_builder_to_archive(this._ptr, out.ptr), 'Failed to write archive');
-      return out.getBytes();
+      return dest === undefined ? out.getBytes() : undefined;
     } finally {
       out.dispose();
     }
   }
 
   /** Async version of toArchive(). Throws a generic error on failure (see Reader.readAsync()). */
-  async toArchiveAsync(): Promise<Buffer> {
-    const out = C2paStream.writable();
+  async toArchiveAsync(dest?: DestinationAsset): Promise<Buffer | undefined> {
+    const out = C2paStream.forDestination(dest);
     try {
       checkIntAsync(
         await callAsync<number | bigint>(getLib().c2pa_builder_to_archive, this._ptr, out.ptr),
         'Failed to write archive',
       );
-      return out.getBytes();
+      return dest === undefined ? out.getBytes() : undefined;
     } finally {
       out.dispose();
     }
   }
 
-  /** Restore a Builder from an archive buffer (replaces current state). */
-  withArchive(archive: Buffer): this {
-    const stream = C2paStream.fromBuffer(archive);
+  /** Restore a Builder from an archive (replaces current state). */
+  withArchive(archive: SourceAsset): this {
+    const stream = C2paStream.fromSource(archive);
     try {
       this._ptr = checkPtr(
         getLib().c2pa_builder_with_archive(this._ptr, stream.ptr),
@@ -418,8 +385,8 @@ export class Builder {
   }
 
   /** Async version of withArchive(). Throws a generic error on failure (see Reader.readAsync()). */
-  async withArchiveAsync(archive: Buffer): Promise<this> {
-    const stream = C2paStream.fromBuffer(archive);
+  async withArchiveAsync(archive: SourceAsset): Promise<this> {
+    const stream = C2paStream.fromSource(archive);
     try {
       this._ptr = checkPtrAsync(
         await callAsync<unknown>(getLib().c2pa_builder_with_archive, this._ptr, stream.ptr),
@@ -431,29 +398,29 @@ export class Builder {
     return this;
   }
 
-  /** Write a single-ingredient archive for a previously added ingredient. */
-  writeIngredientArchive(ingredientId: string): Buffer {
-    const out = C2paStream.writable();
+  /** Write a single-ingredient archive for a previously added ingredient. Pass `dest` to write straight to a file. */
+  writeIngredientArchive(ingredientId: string, dest?: DestinationAsset): Buffer | undefined {
+    const out = C2paStream.forDestination(dest);
     try {
       checkInt(
         getLib().c2pa_builder_write_ingredient_archive(this._ptr, ingredientId, out.ptr),
         'Failed to write ingredient archive',
       );
-      return out.getBytes();
+      return dest === undefined ? out.getBytes() : undefined;
     } finally {
       out.dispose();
     }
   }
 
   /** Async version of writeIngredientArchive(). Throws a generic error on failure (see Reader.readAsync()). */
-  async writeIngredientArchiveAsync(ingredientId: string): Promise<Buffer> {
-    const out = C2paStream.writable();
+  async writeIngredientArchiveAsync(ingredientId: string, dest?: DestinationAsset): Promise<Buffer | undefined> {
+    const out = C2paStream.forDestination(dest);
     try {
       checkIntAsync(
         await callAsync<number | bigint>(getLib().c2pa_builder_write_ingredient_archive, this._ptr, ingredientId, out.ptr),
         'Failed to write ingredient archive',
       );
-      return out.getBytes();
+      return dest === undefined ? out.getBytes() : undefined;
     } finally {
       out.dispose();
     }

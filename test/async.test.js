@@ -6,7 +6,6 @@ const fs = require('fs');
 const os = require('os');
 
 const c2pa = require('../dist/index.js');
-const { C2paStream } = require('../dist/stream.js');
 
 let passed = 0;
 let failed = 0;
@@ -88,23 +87,31 @@ async function main() {
     }
   });
 
+  // Signer is attached to the Context (not passed at sign time) and consumed
+  // by ContextBuilder.withSigner() — build a fresh Signer per Context.
+  function contextWithSigner() {
+    return new c2pa.ContextBuilder().withSigner(c2pa.Signer.fromInfo(signerInfo)).build();
+  }
+
   await test('Builder.signAsync() (in-memory) matches Builder.sign()', async () => {
     const manifestJson = JSON.stringify({ title: 'async test', claim_generator: 'async-test/0.1' });
     const source = fs.readFileSync(testImage);
 
-    const ctx1 = c2pa.Context.default();
+    const ctx1 = contextWithSigner();
     const b1 = new c2pa.Builder(ctx1);
     b1.setDefinition(manifestJson);
-    const s1 = c2pa.Signer.fromInfo(signerInfo);
-    const syncSigned = b1.sign('image/jpeg', source, s1);
-    s1.dispose(); b1.dispose(); ctx1.dispose();
+    const dest1 = { buffer: null };
+    b1.sign('image/jpeg', source, dest1);
+    const syncSigned = dest1.buffer;
+    b1.dispose(); ctx1.dispose();
 
-    const ctx2 = c2pa.Context.default();
+    const ctx2 = contextWithSigner();
     const b2 = new c2pa.Builder(ctx2);
     b2.setDefinition(manifestJson);
-    const s2 = c2pa.Signer.fromInfo(signerInfo);
-    const asyncSigned = await b2.signAsync('image/jpeg', source, s2);
-    s2.dispose(); b2.dispose(); ctx2.dispose();
+    const dest2 = { buffer: null };
+    await b2.signAsync('image/jpeg', source, dest2);
+    const asyncSigned = dest2.buffer;
+    b2.dispose(); ctx2.dispose();
 
     const syncManifest = c2pa.read('image/jpeg', syncSigned);
     const asyncManifest = c2pa.read('image/jpeg', asyncSigned);
@@ -115,36 +122,19 @@ async function main() {
     );
   });
 
-  await test('Builder.signAsync() with fromFile()/toFile() streams signs a large-ish file correctly', async () => {
+  await test('Builder.signAsync() with file-path source/destination signs a large-ish file correctly', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'c2pa-async-test-'));
     try {
       const outPath = path.join(tmpDir, 'signed.jpg');
-      const manifestJson = JSON.stringify({ title: 'async file test', claim_generator: 'async-test/0.1' });
+      const manifestJson = JSON.stringify({ title: 'async file test' });
 
-      const ctx = c2pa.Context.default();
+      const ctx = contextWithSigner();
       const builder = new c2pa.Builder(ctx);
       builder.setDefinition(manifestJson);
-      const signer = c2pa.Signer.fromInfo(signerInfo);
-      const src = C2paStream.fromFile(testImage);
-      const dest = C2paStream.toFile(outPath);
 
-      // signAsync() takes a Buffer; exercise the file-backed path directly
-      // via the same underlying mechanism it uses (getLib().c2pa_builder_sign.async).
-      const { getLib } = require('../dist/lib.js');
-      const manifestBytesOut = [null];
-      await new Promise((resolve, reject) => {
-        getLib().c2pa_builder_sign.async(
-          builder['_ptr'], 'image/jpeg', src.ptr, dest.ptr, signer.ptr, manifestBytesOut,
-          (err, res) => {
-            const n = typeof res === 'bigint' ? Number(res) : res;
-            if (err) return reject(err);
-            if (n < 0) return reject(new Error('signing failed'));
-            resolve();
-          },
-        );
-      });
-      if (manifestBytesOut[0]) getLib().c2pa_free(manifestBytesOut[0]);
-      src.dispose(); dest.dispose(); signer.dispose(); builder.dispose(); ctx.dispose();
+      const manifestBytes = await builder.signAsync('image/jpeg', { path: testImage }, { path: outPath });
+      assert(manifestBytes.length > 0, 'expected non-empty manifest bytes from signAsync()');
+      builder.dispose(); ctx.dispose();
 
       const manifest = c2pa.read('image/jpeg', fs.readFileSync(outPath));
       assert(
@@ -160,16 +150,15 @@ async function main() {
     const source = fs.readFileSync(testImage);
     const N = 10;
     const jobs = Array.from({ length: N }, async (_, i) => {
-      const ctx = c2pa.Context.default();
+      const ctx = contextWithSigner();
       const builder = new c2pa.Builder(ctx);
-      builder.setDefinition(JSON.stringify({ title: `concurrent-${i}`, claim_generator: 'async-test/0.1' }));
-      const signer = c2pa.Signer.fromInfo(signerInfo);
+      builder.setDefinition(JSON.stringify({ title: `concurrent-${i}` }));
       try {
-        const signed = await builder.signAsync('image/jpeg', source, signer);
-        const manifest = c2pa.read('image/jpeg', signed);
+        const dest = { buffer: null };
+        await builder.signAsync('image/jpeg', source, dest);
+        const manifest = c2pa.read('image/jpeg', dest.buffer);
         return manifest.manifests[manifest.active_manifest].title;
       } finally {
-        signer.dispose();
         builder.dispose();
         ctx.dispose();
       }
@@ -180,17 +169,15 @@ async function main() {
   });
 
   await test('Builder.signAsync() throws a generic C2paError on bad credentials', async () => {
-    const ctx = c2pa.Context.default();
+    const ctx = contextWithSigner();
     const builder = new c2pa.Builder(ctx);
     builder.setDefinition(JSON.stringify({ title: 'should fail' }));
     let threw = null;
     try {
-      const signer = c2pa.Signer.fromInfo(signerInfo);
       // Corrupt the builder pointer's expected flow by signing with a
       // mismatched format instead — a reliable way to force a failure
       // without depending on error-message detail (which async doesn't have).
-      await builder.signAsync('not/a-real-mimetype', fs.readFileSync(testImage), signer);
-      signer.dispose();
+      await builder.signAsync('not/a-real-mimetype', fs.readFileSync(testImage), { buffer: null });
     } catch (e) {
       threw = e;
     } finally {

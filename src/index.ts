@@ -40,14 +40,23 @@ export {
   type DigitalSourceType,
 } from './builder.js';
 
+export {
+  type SourceAsset,
+  type DestinationAsset,
+  type FileAsset,
+  type FileHandleAsset,
+  type DestinationBufferAsset,
+} from './stream.js';
+
 // ── Convenience functions ────────────────────────────────────────────────────
 
 import { decodeAndFree, getLib } from './lib.js';
 import { C2paError, ManifestNotFoundError } from './error.js';
-import { Context } from './context.js';
+import { Context, ContextBuilder } from './context.js';
 import { Reader } from './reader.js';
 import { Builder } from './builder.js';
 import { Signer } from './signer.js';
+import type { SourceAsset, DestinationAsset } from './stream.js';
 
 /** Return the version string of the loaded C2PA library. */
 export function version(): string {
@@ -64,7 +73,7 @@ export function version(): string {
  * if (manifest) console.log(manifest.active_manifest);
  * ```
  */
-export function read(mimeType: string, asset: Buffer): Record<string, unknown> | null {
+export function read(mimeType: string, asset: SourceAsset): Record<string, unknown> | null {
   const ctx = Context.default();
   const reader = new Reader(ctx);
   try {
@@ -80,23 +89,33 @@ export function read(mimeType: string, asset: Buffer): Record<string, unknown> |
 }
 
 /**
- * Sign an asset with a manifest definition and return the signed bytes.
+ * Sign an asset with a manifest definition. The signed asset is written to
+ * `dest` — a file path, an open file handle, or `{ buffer: null }`
+ * (populated in place with the signed bytes for the common in-memory case).
+ * Returns the raw manifest bytes (see Builder.sign()).
+ *
+ * `signer` is consumed (ownership transfers to an internal Context) — do not
+ * reuse or dispose it afterward. Construct a fresh Signer per call if you're
+ * signing multiple assets with the same credentials.
  *
  * ```ts
- * const signed = sign('image/jpeg', jpegBuffer, manifestJson, signer);
+ * const dest = { buffer: null };
+ * const manifestBytes = sign('image/jpeg', jpegBuffer, manifestJson, signer, dest);
+ * const signedAsset = dest.buffer;
  * ```
  */
 export function sign(
   mimeType: string,
-  asset: Buffer,
+  asset: SourceAsset,
   manifestJson: string,
   signer: Signer,
+  dest: DestinationAsset,
 ): Buffer {
-  const ctx = Context.default();
+  const ctx = new ContextBuilder().withSigner(signer).build();
   const builder = new Builder(ctx);
   try {
     builder.setDefinition(manifestJson);
-    return builder.sign(mimeType, asset, signer);
+    return builder.sign(mimeType, asset, dest);
   } finally {
     builder.dispose();
     ctx.dispose();
